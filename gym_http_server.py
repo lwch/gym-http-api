@@ -2,16 +2,18 @@
 from flask import Flask, request, jsonify
 import uuid
 import gym
+from gym.wrappers.monitoring.video_recorder import VideoRecorder
 import numpy as np
 import six
 import argparse
-import sys
 import json
 
 
 import logging
-logger = logging.getLogger('werkzeug')
+
+logger = logging.getLogger("werkzeug")
 logger.setLevel(logging.ERROR)
+
 
 ########## Container for environments ##########
 class Envs(object):
@@ -25,21 +27,29 @@ class Envs(object):
     use of this instance_id to identify which environment
     should be manipulated.
     """
+
     def __init__(self):
         self.envs = {}
+        self.recorders = {}
         self.id_len = 8
 
     def _lookup_env(self, instance_id):
         try:
             return self.envs[instance_id]
         except KeyError:
-            raise InvalidUsage('Instance_id {} unknown'.format(instance_id))
+            raise InvalidUsage("Instance_id {} unknown".format(instance_id))
+
+    def _lookup_recorder(self, instance_id):
+        try:
+            return self.recorders[instance_id]
+        except KeyError:
+            raise InvalidUsage("Instance_id {} unknown".format(instance_id))
 
     def _remove_env(self, instance_id):
         try:
             del self.envs[instance_id]
         except KeyError:
-            raise InvalidUsage('Instance_id {} unknown'.format(instance_id))
+            raise InvalidUsage("Instance_id {} unknown".format(instance_id))
 
     def create(self, env_id, seed=None):
         try:
@@ -47,14 +57,18 @@ class Envs(object):
             if seed:
                 env.seed(seed)
         except gym.error.Error:
-            raise InvalidUsage("Attempted to look up malformed environment ID '{}'".format(env_id))
+            raise InvalidUsage(
+                "Attempted to look up malformed environment ID '{}'".format(env_id)
+            )
 
-        instance_id = str(uuid.uuid4().hex)[:self.id_len]
+        instance_id = str(uuid.uuid4().hex)[: self.id_len]
         self.envs[instance_id] = env
         return instance_id
 
     def list_all(self):
-        return dict([(instance_id, env.spec.id) for (instance_id, env) in self.envs.items()])
+        return dict(
+            [(instance_id, env.spec.id) for (instance_id, env) in self.envs.items()]
+        )
 
     def reset(self, instance_id):
         env = self._lookup_env(instance_id)
@@ -63,12 +77,15 @@ class Envs(object):
 
     def step(self, instance_id, action, render):
         env = self._lookup_env(instance_id)
-        if isinstance( action, six.integer_types ):
+        if isinstance(action, six.integer_types):
             nice_action = action
         else:
             nice_action = np.array(action)
         if render:
             env.render()
+        recoder = self._lookup_recorder(instance_id)
+        if recoder is not None:
+            recoder.capture_frame()
         [observation, reward, done, info] = env.step(nice_action)
         obs_jsonable = env.observation_space.to_jsonable(observation)
         return [obs_jsonable, reward, done, info]
@@ -84,12 +101,12 @@ class Envs(object):
     def get_action_space_sample(self, instance_id):
         env = self._lookup_env(instance_id)
         action = env.action_space.sample()
-        if isinstance(action, (list, tuple)) or ('numpy' in str(type(action))):
+        if isinstance(action, (list, tuple)) or ("numpy" in str(type(action))):
             try:
                 action = action.tolist()
             except TypeError:
                 print(type(action))
-                print('TypeError')
+                print("TypeError")
         return action
 
     def get_observation_space_contains(self, instance_id, j):
@@ -98,7 +115,11 @@ class Envs(object):
         for key, value in j.items():
             # Convert both values to json for comparibility
             if json.dumps(info[key]) != json.dumps(value):
-                print('Values for "{}" do not match. Passed "{}", Observed "{}".'.format(key, value, info[key]))
+                print(
+                    'Values for "{}" do not match. Passed "{}", Observed "{}".'.format(
+                        key, value, info[key]
+                    )
+                )
                 return False
         return True
 
@@ -108,46 +129,55 @@ class Envs(object):
 
     def _get_space_properties(self, space):
         info = {}
-        info['name'] = space.__class__.__name__
-        if info['name'] == 'Discrete':
-            info['n'] = space.n
-        elif info['name'] == 'Box':
-            info['shape'] = space.shape
+        info["name"] = space.__class__.__name__
+        if info["name"] == "Discrete":
+            info["n"] = space.n
+        elif info["name"] == "Box":
+            info["shape"] = space.shape
             # It's not JSON compliant to have Infinity, -Infinity, NaN.
             # Many newer JSON parsers allow it, but many don't. Notably python json
             # module can read and write such floats. So we only here fix "export version",
             # also make it flat.
-            info['low']  = [(x if x != -np.inf else -1e100) for x in np.array(space.low ).flatten()]
-            info['high'] = [(x if x != +np.inf else +1e100) for x in np.array(space.high).flatten()]
-        elif info['name'] == 'HighLow':
-            info['num_rows'] = space.num_rows
-            info['matrix'] = [((float(x) if x != -np.inf else -1e100) if x != +np.inf else +1e100) for x in np.array(space.matrix).flatten()]
+            info["low"] = [
+                (x if x != -np.inf else -1e100) for x in np.array(space.low).flatten()
+            ]
+            info["high"] = [
+                (x if x != +np.inf else +1e100) for x in np.array(space.high).flatten()
+            ]
+        elif info["name"] == "HighLow":
+            info["num_rows"] = space.num_rows
+            info["matrix"] = [
+                ((float(x) if x != -np.inf else -1e100) if x != +np.inf else +1e100)
+                for x in np.array(space.matrix).flatten()
+            ]
         return info
 
-    def monitor_start(self, instance_id, directory, force, resume, video_callable):
+    def monitor_start(self, instance_id, directory):
         env = self._lookup_env(instance_id)
-        if video_callable == False:
-            v_c = lambda count: False
-        else:
-            v_c = lambda count: count % video_callable == 0
-        self.envs[instance_id] = gym.wrappers.Monitor(env, directory, force=force, resume=resume, video_callable=v_c) 
+        self.recorders[instance_id] = VideoRecorder(env, directory)
 
     def monitor_close(self, instance_id):
-        env = self._lookup_env(instance_id)
-        env.close()
+        recoder = self._lookup_recorder(instance_id)
+        recoder.close()
 
     def env_close(self, instance_id):
+        recoder = self._lookup_recorder(instance_id)
+        recoder.close()
         env = self._lookup_env(instance_id)
         env.close()
         self._remove_env(instance_id)
 
+
 ########## App setup ##########
 app = Flask(__name__)
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
+app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 envs = Envs()
+
+
 ########## Error handling ##########
 class InvalidUsage(Exception):
     status_code = 400
+
     def __init__(self, message, status_code=None, payload=None):
         Exception.__init__(self)
         self.message = message
@@ -157,28 +187,39 @@ class InvalidUsage(Exception):
 
     def to_dict(self):
         rv = dict(self.payload or ())
-        rv['message'] = self.message
+        rv["message"] = self.message
         return rv
+
 
 def get_required_param(json, param):
     if json is None:
         logger.info("Request is not a valid json")
         raise InvalidUsage("Request is not a valid json")
     value = json.get(param, None)
-    if (value is None) or (value=='') or (value==[]):
-        logger.info("A required request parameter '{}' had value {}".format(param, value))
-        raise InvalidUsage("A required request parameter '{}' was not provided".format(param))
+    if (value is None) or (value == "") or (value == []):
+        logger.info(
+            "A required request parameter '{}' had value {}".format(param, value)
+        )
+        raise InvalidUsage(
+            "A required request parameter '{}' was not provided".format(param)
+        )
     return value
+
 
 def get_optional_param(json, param, default):
     if json is None:
         logger.info("Request is not a valid json")
         raise InvalidUsage("Request is not a valid json")
     value = json.get(param, None)
-    if (value is None) or (value=='') or (value==[]):
-        logger.info("An optional request parameter '{}' had value {} and was replaced with default value {}".format(param, value, default))
+    if (value is None) or (value == "") or (value == []):
+        logger.info(
+            "An optional request parameter '{}' had value {} and was replaced with default value {}".format(
+                param, value, default
+            )
+        )
         value = default
     return value
+
 
 @app.errorhandler(InvalidUsage)
 def handle_invalid_usage(error):
@@ -186,8 +227,9 @@ def handle_invalid_usage(error):
     response.status_code = error.status_code
     return response
 
+
 ########## API route definitions ##########
-@app.route('/v1/envs/', methods=['POST'])
+@app.route("/v1/envs/", methods=["POST"])
 def env_create():
     """
     Create an instance of the specified environment
@@ -201,12 +243,13 @@ def env_create():
         used in future API calls to identify the environment to be
         manipulated
     """
-    env_id = get_required_param(request.get_json(), 'env_id')
-    seed = get_optional_param(request.get_json(), 'seed', None)
+    env_id = get_required_param(request.get_json(), "env_id")
+    seed = get_optional_param(request.get_json(), "seed", None)
     instance_id = envs.create(env_id, seed)
-    return jsonify(instance_id = instance_id)
+    return jsonify(instance_id=instance_id)
 
-@app.route('/v1/envs/', methods=['GET'])
+
+@app.route("/v1/envs/", methods=["GET"])
 def env_list_all():
     """
     List all environments running on the server
@@ -217,9 +260,10 @@ def env_list_all():
         on the server
     """
     all_envs = envs.list_all()
-    return jsonify(all_envs = all_envs)
+    return jsonify(all_envs=all_envs)
 
-@app.route('/v1/envs/<instance_id>/reset/', methods=['POST'])
+
+@app.route("/v1/envs/<instance_id>/reset/", methods=["POST"])
 def env_reset(instance_id):
     """
     Reset the state of the environment and return an initial
@@ -234,9 +278,10 @@ def env_reset(instance_id):
     observation = envs.reset(instance_id)
     if np.isscalar(observation):
         observation = observation.item()
-    return jsonify(observation = observation)
+    return jsonify(observation=observation)
 
-@app.route('/v1/envs/<instance_id>/step/', methods=['POST'])
+
+@app.route("/v1/envs/<instance_id>/step/", methods=["POST"])
 def env_step(instance_id):
     """
     Run one timestep of the environment's dynamics.
@@ -253,13 +298,13 @@ def env_step(instance_id):
         - info: a dict containing auxiliary diagnostic information
     """
     json = request.get_json()
-    action = get_required_param(json, 'action')
-    render = get_optional_param(json, 'render', False)
+    action = get_required_param(json, "action")
+    render = get_optional_param(json, "render", False)
     [obs_jsonable, reward, done, info] = envs.step(instance_id, action, render)
-    return jsonify(observation = obs_jsonable,
-                    reward = reward, done = done, info = info)
+    return jsonify(observation=obs_jsonable, reward=reward, done=done, info=info)
 
-@app.route('/v1/envs/<instance_id>/action_space/', methods=['GET'])
+
+@app.route("/v1/envs/<instance_id>/action_space/", methods=["GET"])
 def env_action_space_info(instance_id):
     """
     Get information (name and dimensions/bounds) of the env's
@@ -274,9 +319,10 @@ def env_action_space_info(instance_id):
     space to space
     """
     info = envs.get_action_space_info(instance_id)
-    return jsonify(info = info)
+    return jsonify(info=info)
 
-@app.route('/v1/envs/<instance_id>/action_space/sample', methods=['GET'])
+
+@app.route("/v1/envs/<instance_id>/action_space/sample", methods=["GET"])
 def env_action_space_sample(instance_id):
     """
     Get a sample from the env's action_space
@@ -286,28 +332,30 @@ def env_action_space_sample(instance_id):
         for the environment instance
     Returns:
 
-    	- action: a randomly sampled element belonging to the action_space
-    """  
+        - action: a randomly sampled element belonging to the action_space
+    """
     action = envs.get_action_space_sample(instance_id)
-    return jsonify(action = action)
+    return jsonify(action=action)
 
-@app.route('/v1/envs/<instance_id>/action_space/contains/<x>', methods=['GET'])
+
+@app.route("/v1/envs/<instance_id>/action_space/contains/<x>", methods=["GET"])
 def env_action_space_contains(instance_id, x):
     """
     Assess that value is a member of the env's action_space
-    
+
     Parameters:
         - instance_id: a short identifier (such as '3c657dbc')
         for the environment instance
-	    - x: the value to be checked as member
+            - x: the value to be checked as member
     Returns:
         - member: whether the value passed as parameter belongs to the action_space
-    """  
+    """
 
     member = envs.get_action_space_contains(instance_id, x)
-    return jsonify(member = member)
+    return jsonify(member=member)
 
-@app.route('/v1/envs/<instance_id>/observation_space/contains', methods=['POST'])
+
+@app.route("/v1/envs/<instance_id>/observation_space/contains", methods=["POST"])
 def env_observation_space_contains(instance_id):
     """
     Assess that the parameters are members of the env's observation_space
@@ -320,9 +368,10 @@ def env_observation_space_contains(instance_id):
     """
     j = request.get_json()
     member = envs.get_observation_space_contains(instance_id, j)
-    return jsonify(member = member)
+    return jsonify(member=member)
 
-@app.route('/v1/envs/<instance_id>/observation_space/', methods=['GET'])
+
+@app.route("/v1/envs/<instance_id>/observation_space/", methods=["GET"])
 def env_observation_space_info(instance_id):
     """
     Get information (name and dimensions/bounds) of the env's
@@ -337,9 +386,10 @@ def env_observation_space_info(instance_id):
         varies from space to space
     """
     info = envs.get_observation_space_info(instance_id)
-    return jsonify(info = info)
+    return jsonify(info=info)
 
-@app.route('/v1/envs/<instance_id>/monitor/start/', methods=['POST'])
+
+@app.route("/v1/envs/<instance_id>/monitor/start/", methods=["POST"])
 def env_monitor_start(instance_id):
     """
     Start monitoring.
@@ -356,14 +406,12 @@ def env_monitor_start(instance_id):
     """
     j = request.get_json()
 
-    directory = get_required_param(j, 'directory')
-    force = get_optional_param(j, 'force', False)
-    resume = get_optional_param(j, 'resume', False)
-    video_callable = get_optional_param(j, 'video_callable', False)
-    envs.monitor_start(instance_id, directory, force, resume, video_callable)
-    return ('', 204)
+    directory = get_required_param(j, "directory")
+    envs.monitor_start(instance_id, directory)
+    return ("", 204)
 
-@app.route('/v1/envs/<instance_id>/monitor/close/', methods=['POST'])
+
+@app.route("/v1/envs/<instance_id>/monitor/close/", methods=["POST"])
 def env_monitor_close(instance_id):
     """
     Flush all monitor data to disk.
@@ -373,9 +421,10 @@ def env_monitor_close(instance_id):
           for the environment instance
     """
     envs.monitor_close(instance_id)
-    return ('', 204)
+    return ("", 204)
 
-@app.route('/v1/envs/<instance_id>/close/', methods=['POST'])
+
+@app.route("/v1/envs/<instance_id>/close/", methods=["POST"])
 def env_close(instance_id):
     """
     Manually close an environment
@@ -385,9 +434,10 @@ def env_close(instance_id):
           for the environment instance
     """
     envs.env_close(instance_id)
-    return ('', 204)
+    return ("", 204)
 
-@app.route('/v1/upload/', methods=['POST'])
+
+@app.route("/v1/upload/", methods=["POST"])
 def upload():
     """
     Upload the results of training (as automatically recorded by
@@ -400,31 +450,40 @@ def upload():
         - algorithm_id (default=None): An arbitrary string
         indicating the paricular version of the algorithm
         (including choices of parameters) you are running.
-        """
+    """
     j = request.get_json()
-    training_dir = get_required_param(j, 'training_dir')
-    api_key      = get_required_param(j, 'api_key')
-    algorithm_id = get_optional_param(j, 'algorithm_id', None)
+    training_dir = get_required_param(j, "training_dir")
+    api_key = get_required_param(j, "api_key")
+    algorithm_id = get_optional_param(j, "algorithm_id", None)
 
     try:
-        gym.upload(training_dir, algorithm_id, writeup=None, api_key=api_key,
-                   ignore_open_monitors=False)
-        return ('', 204)
+        gym.upload(
+            training_dir,
+            algorithm_id,
+            writeup=None,
+            api_key=api_key,
+            ignore_open_monitors=False,
+        )
+        return ("", 204)
     except gym.error.AuthenticationError:
-        raise InvalidUsage('You must provide an OpenAI Gym API key')
+        raise InvalidUsage("You must provide an OpenAI Gym API key")
 
-@app.route('/v1/shutdown/', methods=['POST'])
+
+@app.route("/v1/shutdown/", methods=["POST"])
 def shutdown():
-    """ Request a server shutdown - currently used by the integration tests to repeatedly create and destroy fresh copies of the server running in a separate thread"""
-    f = request.environ.get('werkzeug.server.shutdown')
+    """Request a server shutdown - currently used by the integration tests to repeatedly create and destroy fresh copies of the server running in a separate thread"""
+    f = request.environ.get("werkzeug.server.shutdown")
     f()
-    return 'Server shutting down'
+    return "Server shutting down"
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Start a Gym HTTP API server')
-    parser.add_argument('-l', '--listen', help='interface to listen to', default='127.0.0.1')
-    parser.add_argument('-p', '--port', default=5000, type=int, help='port to bind to')
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Start a Gym HTTP API server")
+    parser.add_argument(
+        "-l", "--listen", help="interface to listen to", default="127.0.0.1"
+    )
+    parser.add_argument("-p", "--port", default=5000, type=int, help="port to bind to")
 
     args = parser.parse_args()
-    print('Server starting at: ' + 'http://{}:{}'.format(args.listen, args.port))
+    print("Server starting at: " + "http://{}:{}".format(args.listen, args.port))
     app.run(host=args.listen, port=args.port)
