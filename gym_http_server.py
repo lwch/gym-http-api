@@ -221,6 +221,15 @@ def get_optional_param(json, param, default):
     return value
 
 
+def to_json(obj):
+    if type(obj).__module__ == np.__name__:
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj.item()
+    raise TypeError("Unknown type:", type(obj))
+
+
 @app.errorhandler(InvalidUsage)
 def handle_invalid_usage(error):
     response = jsonify(error.to_dict())
@@ -386,7 +395,7 @@ def env_observation_space_info(instance_id):
         varies from space to space
     """
     info = envs.get_observation_space_info(instance_id)
-    return jsonify(info=info)
+    return json.dumps({"info": info}, default=to_json)
 
 
 @app.route("/v1/envs/<instance_id>/monitor/start/", methods=["POST"])
