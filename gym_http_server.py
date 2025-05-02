@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os
+import pathlib
 from flask import Flask, request, jsonify
 import uuid
 import gym
@@ -154,6 +156,7 @@ class Envs(object):
 
     def monitor_start(self, instance_id, directory):
         env = self._lookup_env(instance_id)
+        pathlib.Path(os.path.dirname(directory)).mkdir(parents=True, exist_ok=True)
         self.recorders[instance_id] = VideoRecorder(env, directory)
 
     def monitor_close(self, instance_id):
